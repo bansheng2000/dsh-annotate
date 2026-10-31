@@ -1,0 +1,44 @@
+{
+  "name": "dsh-annotate",
+  "version": "0.1.0",
+  "description": "侧边栏批注：对 AI 刚产出的成品图 / 文档直接指出不满意之处，每处配一句话要求，一键整理成修改指令插进输入框，只作指令用——不写回源软件，也不进成品。",
+  "type": "module",
+  "main": "lib/index.js",
+  "exports": {
+    ".": "./lib/index.js",
+    "./client": "./lib/client.js",
+    "./package.json": "./package.json"
+  },
+  "files": [
+    "lib/index.js",
+    "lib/client.js",
+    "cordis.patch.yml",
+    "README.md"
+  ],
+  "keywords": [
+    "deepseek-harness",
+    "dsh-plugin",
+    "annotate",
+    "annotation",
+    "sidebar",
+    "review"
+  ],
+  "license": "MIT",
+  "engines": {
+    "node": ">=20"
+  },
+  "dsh": {
+    "bundle": {
+      "patch": "cordis.patch.yml"
+    },
+    "client": {
+      "inject": [
+        "slots"
+      ],
+      "platform": "web"
+    },
+    "engines": {
+      "dsh": ">=0.1.7-rc.1"
+    }
+  }
+}
