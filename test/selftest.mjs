@@ -259,10 +259,7 @@ assert.equal(t.getItems()[0].ref, "S1");
 const noAlt = { getAttribute: (k) => (k === "src" ? "https://x/y/fig-2.png?raw=1" : null) };
 assert.equal(t.imageRef(noAlt), "fig-2.png");
 const dataImg = { getAttribute: (k) => (k === "src" ? "data:image/png;base64,AAAA" : null) };
-const hadQS = document.querySelectorAll;
-document.querySelectorAll = () => [dataImg, dataImg];
-assert.equal(t.imageRef(dataImg), "第 1 张图");
-document.querySelectorAll = hadQS;
+assert.equal(t.imageRef(dataImg), "内嵌图片", "拿不到消息容器就不给会漂移的序号");
 
 // --- 文字批注带上前后文上下文 ---
 const ctxHit = t.hitAt(
@@ -284,26 +281,55 @@ t.doUndo();
 assert.equal(t.getItems().length, 1, "撤销不得把新批注吞掉");
 assert.equal(t.getItems()[0].note, "新的一条");
 
-// --- ⑤ 图片兜底编号按消息容器计数：不同消息的第 N 张图不再撞名 ---
+// --- ⑤ 图片兜底编号：容器内计数、带会话前缀 ---
 const mkDataImg = () => ({ getAttribute: (k) => (k === "src" ? "data:image/png;base64,AAAA" : null) });
 const mkBox = (key, imgs) => ({
   getAttribute: (k) => (k === "data-chat-node-key" ? key : null),
   querySelectorAll: () => imgs,
 });
+t.setSession("s1");
 const imgA = mkDataImg();
 const imgB = mkDataImg();
 const boxA = mkBox("chat-a1b2", [mkDataImg(), mkDataImg(), imgA]);
 const boxB = mkBox("chat-b9z8", [mkDataImg(), mkDataImg(), imgB]);
 imgA.closest = () => boxA;
 imgB.closest = () => boxB;
-assert.equal(t.imageRef(imgA), "第 3/3 张图 · chat-a1b2", "按消息容器计数并带消息键");
+assert.equal(t.imageRef(imgA), "第 3/3 张图 · s1/chat-a1b2", "按消息容器计数，键带会话前缀");
 assert.notEqual(t.imageRef(imgA), t.imageRef(imgB), "不同消息里同序号的图不得同 ref");
+t.setSession("s2");
+const refOtherSession = t.imageRef(imgA);
+t.setSession("s1");
+assert.notEqual(t.imageRef(imgA), refOtherSession, "同一张图换个会话也不能同 ref（轮次号跨会话重号）");
 
-// --- ⑧ 来源标签只认右栏容器；判不出就 null（不再按 62% 宽度硬猜）---
-assert.equal(t.zoneOf({ closest: (sel) => (/data-sidebar-right-session/.test(sel) ? {} : null) }), "panel");
-assert.equal(t.zoneOf({ closest: () => null }), null, "聊天区/判不出的位置不得标成侧栏面板");
+// --- ⑤ 头像/图标不算数；懒加载量不到宽高的图仍要算 ---
+const realImg = mkDataImg();
+const avatarImg = mkDataImg();
+const lazyImg = mkDataImg();
+realImg.naturalWidth = 800;
+realImg.naturalHeight = 600;
+avatarImg.naturalWidth = 24;
+avatarImg.naturalHeight = 24;
+const fbox = mkBox("chat-f1", [avatarImg, realImg, lazyImg]);
+realImg.closest = () => fbox;
+lazyImg.closest = () => fbox;
+assert.equal(t.imageRef(realImg), "第 1/2 张图 · s1/chat-f1", "24px 头像必须过滤，量不到宽高的懒加载图按真图计");
+
+// --- ⑧ 来源标签：对话区 → null，右栏 → panel，其它 → page ---
+const mkTarget = (opts) => ({
+  closest: (sel) => {
+    if (opts.chat && /data-conversation-scroll/.test(sel)) return {};
+    if (opts.dock && /data-sidebar-right-session/.test(sel)) return {};
+    return null;
+  },
+});
+assert.equal(t.zoneOf(mkTarget({ dock: true })), "panel");
+assert.equal(t.zoneOf(mkTarget({ chat: true, dock: true })), null, "对话区优先：工作区整体包在 pane 里也不能标成侧栏面板");
+assert.equal(t.zoneOf(mkTarget({})), "page", "非对话、非右栏的内容算「页面」，不是「对话」");
 assert.equal(t.zoneOf(null), null);
 assert.equal(t.zoneOf({}), null, "没有 closest 的元素也要安全退回 null");
+const pageHit = t.hitAt(mkTarget({}), { zone: "page", selText: "标题", selCtx: "标题", cx: 1, cy: 1 });
+assert.equal(pageHit.kind, "page");
+assert.equal(t.KIND_LABEL.page, "页面");
 
 // --- ④ 角标重算：预览增删/自身属性变化触发，canvas 也算候选，60ms 节流不退化 ---
 const previewNode = { nodeType: 1, matches: (s) => s.indexOf("iframe") >= 0, querySelector: () => null };
@@ -353,14 +379,18 @@ const canvasNode = {
   querySelector: () => null,
 };
 const hadQSPins = document.querySelectorAll;
-document.querySelectorAll = (sel) => (sel === "iframe, embed, object, canvas" ? [frameNode, canvasNode] : []);
+const parentBox = { nodeType: 1 };
+frameNode.parentElement = parentBox;
+document.querySelectorAll = (sel) => (sel === "iframe, embed, object" ? [frameNode] : []);
 
 const pins = t.pins();
 assert.ok(pins, "角标探针要在 apply 时挂上");
 pins.sync();
 let snap = pins.snapshot();
-assert.equal(snap.length, 2, "iframe 与 canvas 都要角标");
-assert.equal(observed.length, 2, "ResizeObserver 要盯住每块预览");
+assert.equal(snap.length, 1, "只给 iframe/embed/object 挂角标：canvas 不吃 mouseup，直接点即可");
+assert.ok(observed.indexOf(frameNode) >= 0, "预览自身要进 ResizeObserver");
+assert.ok(observed.indexOf(parentBox) >= 0, "父容器也要盯，否则流式内容把预览推下去时角标不动");
+assert.equal(observed.length, 2, "同一块预览 + 父容器各 observe 一次");
 assert.equal(snap[0].left, "388px", "角标贴预览右下（400-0-12）");
 assert.equal(snap[0].top, "388px");
 
@@ -373,7 +403,7 @@ assert.equal(observed.length, 2, "稳定集合不得反复 observe（否则自�
 
 rectFrame = { left: 100, top: 200, width: 50, height: 50, right: 150, bottom: 250 };
 pins.sync();
-assert.equal(pins.snapshot().length, 1, "缩到看不见的预览不再挂角标");
+assert.equal(pins.snapshot().length, 0, "缩到看不见的预览不再挂角标");
 
 const before = pins.syncs;
 pins.schedule();
@@ -388,5 +418,79 @@ assert.equal(pins.syncs, beforeRO + 1, "预览尺寸变化要经 ResizeObserver 
 
 document.querySelectorAll = hadQSPins;
 delete globalThis.ResizeObserver;
+
+// --- 必修1：只移出勾选的，没勾的必须留着 ---
+t.reset();
+t.setSession("s9");
+t.pushItem(t.getItems(), { kind: "text", ref: "A", note: "第一条" });
+t.pushItem(t.getItems(), { kind: "text", ref: "B", note: "第二条" });
+t.pushItem(t.getItems(), { kind: "text", ref: "C", note: "第三条" });
+t.getItems()[1].on = false;
+t.setComposer(() => true);
+assert.equal(t.doSend(), true);
+assert.equal(t.getItems().length, 1, "没勾的那条必须留在清单里");
+assert.equal(t.getItems()[0].ref, "B");
+t.doUndo();
+assert.equal(t.getItems().length, 3, "撤销把已发的放回，且不吞掉没勾的");
+
+// --- 必修3：写回被拒不能说成「没有输入框」 ---
+t.reset();
+t.setSession("s10");
+t.pushItem(t.getItems(), { kind: "text", ref: "X", note: "写回会失败" });
+t.setComposer(() => false);
+assert.equal(t.doSend(), false);
+assert.equal(t.getItems().length, 1, "写回失败不得清清单");
+assert.ok(t.hint().includes("草稿刚变过"), "失败文案要指向「再点一次」：" + t.hint());
+
+const noApi = t.writeBack({ draft: "", draftRev: 1, actions: {}, text: "x" });
+assert.equal(noApi.ok, false);
+assert.equal(noApi.noApi, true, "两张 API 都没有才算「没有输入框」");
+
+// --- 必修4：草稿里有 chip/附件占位符时只追加，不整段替换 ---
+const chipDraft = "看一下这段\uFFFC 再改";
+const chipCalls = [];
+const chipRes = t.writeBack({
+  draft: chipDraft,
+  draftRev: 7,
+  actions: {
+    insertText: (text, span) => {
+      chipCalls.push({ text, span });
+      return true;
+    },
+  },
+  text: "请按下面 1 条批注修改：",
+});
+assert.equal(chipRes.ok, true);
+assert.equal(chipCalls[0].span.start, chipDraft.length, "含占位符时 start 必须是草稿末尾");
+assert.equal(chipCalls[0].span.end, chipDraft.length, "含占位符时 end 必须是草稿末尾");
+assert.ok(!chipCalls[0].text.includes("看一下"), "不得整段替换草稿（会抹掉 chip）");
+assert.ok(chipRes.note.includes("原引用保留"), "提示语要说清原引用保留：" + chipRes.note);
+
+const plainCalls = [];
+const plainDraft = "旧草稿内容";
+t.writeBack({
+  draft: plainDraft,
+  draftRev: 7,
+  actions: {
+    insertText: (text, span) => {
+      plainCalls.push({ text, span });
+      return true;
+    },
+  },
+  text: "批注",
+});
+assert.equal(plainCalls[0].span.start, 0);
+assert.equal(plainCalls[0].span.end, plainDraft.length);
+assert.equal(plainCalls[0].text, plainDraft + "\n\n批注", "没有占位符时仍整段替换写回");
+
+// --- 建议11：插槽没挂时不得把批注写进上一个会话的桶 ---
+t.reset();
+t.setButton(null);
+assert.equal(t.slotLive(), false);
+assert.equal(t.record({ kind: "text", ref: "R", x: null, y: null }, "无会话"), false);
+assert.equal(t.getItems().length, 0, "没有可归属的会话就不记");
+t.setButton({ isConnected: true });
+assert.equal(t.record({ kind: "text", ref: "R", x: null, y: null }, "有会话"), true);
+assert.equal(t.getItems().length, 1);
 
 console.log("selftest ok");

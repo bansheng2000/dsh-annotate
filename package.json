@@ -1,6 +1,6 @@
 {
   "name": "dsh-annotate",
-  "version": "0.1.1",
+  "version": "0.1.2",
   "description": "侧边栏批注：对 AI 刚产出的成品图 / 文档直接指出不满意之处，每处配一句话要求，一键整理成修改指令插进输入框，只作指令用——不写回源软件，也不进成品。",
   "type": "module",
   "main": "lib/index.js",
