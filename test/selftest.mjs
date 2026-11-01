@@ -221,4 +221,172 @@ const yml = readFileSync(join(ROOT, "cordis.patch.yml"), "utf8");
 assert.ok(yml.includes("- insert:"), "patch 必须用 insert: 包裹");
 assert.ok(yml.includes("name: dsh-annotate"), yml);
 
+// --- 写回失败不得报成功（宿主 insertText 在 revision 漂移时返回 false） ---
+t.reset();
+t.pushItem(t.getItems(), { kind: "text", ref: "A", note: "改一下" });
+const calls = [];
+t.setComposer((text) => {
+  calls.push(text);
+  return false;
+});
+assert.equal(t.doSend(), false, "宿主拒绝时 doSend 必须返回 false");
+assert.equal(t.getItems().length, 1, "写回失败不得清空清单");
+
+// --- 宿主接受：清单清空，且可以撤销 ---
+t.setComposer((text) => {
+  calls.push(text);
+  return true;
+});
+assert.equal(t.doSend(), true);
+assert.equal(t.getItems().length, 0, "发送成功后清单清空");
+assert.ok(t.hasBackup(), "要留住刚发出的那批供撤销");
+t.doUndo();
+assert.equal(t.getItems().length, 1, "撤销把批注恢复回来");
+assert.equal(t.getItems()[0].note, "改一下");
+
+// --- 清单按会话分桶：切会话不能串味 ---
+t.reset();
+t.setSession("s1");
+t.pushItem(t.getItems(), { kind: "text", ref: "S1", note: "会话一" });
+t.setSession("s2");
+assert.equal(t.getItems().length, 0, "另一个会话看不到上一段的批注");
+t.pushItem(t.getItems(), { kind: "text", ref: "S2", note: "会话二" });
+t.setSession("s1");
+assert.equal(t.getItems().length, 1);
+assert.equal(t.getItems()[0].ref, "S1");
+
+// --- 图片 ref：无 alt 用文件名，再退回「第 N 张图」 ---
+const noAlt = { getAttribute: (k) => (k === "src" ? "https://x/y/fig-2.png?raw=1" : null) };
+assert.equal(t.imageRef(noAlt), "fig-2.png");
+const dataImg = { getAttribute: (k) => (k === "src" ? "data:image/png;base64,AAAA" : null) };
+const hadQS = document.querySelectorAll;
+document.querySelectorAll = () => [dataImg, dataImg];
+assert.equal(t.imageRef(dataImg), "第 1 张图");
+document.querySelectorAll = hadQS;
+
+// --- 文字批注带上前后文上下文 ---
+const ctxHit = t.hitAt(
+  { closest: () => null },
+  { zone: null, selText: "结论", selCtx: "前文 … 结论 … 后文", cx: 10, cy: 10 },
+);
+assert.equal(ctxHit.kind, "text");
+assert.ok(ctxHit.ref.includes("前文"), ctxHit.ref);
+
+// --- 新批注出现后，上一次的「撤销」必须失效（否则撤销会把新条目一起吞掉） ---
+t.reset();
+t.pushItem(t.getItems(), { kind: "text", ref: "旧", note: "旧的一条" });
+t.setComposer(() => true);
+t.doSend();
+assert.ok(t.hasBackup(), "发送后应留下撤销备份");
+t.pushItem(t.getItems(), { kind: "text", ref: "新", note: "新的一条" });
+assert.equal(t.hasBackup(), false, "新批注一出现，撤销备份就该作废");
+t.doUndo();
+assert.equal(t.getItems().length, 1, "撤销不得把新批注吞掉");
+assert.equal(t.getItems()[0].note, "新的一条");
+
+// --- ⑤ 图片兜底编号按消息容器计数：不同消息的第 N 张图不再撞名 ---
+const mkDataImg = () => ({ getAttribute: (k) => (k === "src" ? "data:image/png;base64,AAAA" : null) });
+const mkBox = (key, imgs) => ({
+  getAttribute: (k) => (k === "data-chat-node-key" ? key : null),
+  querySelectorAll: () => imgs,
+});
+const imgA = mkDataImg();
+const imgB = mkDataImg();
+const boxA = mkBox("chat-a1b2", [mkDataImg(), mkDataImg(), imgA]);
+const boxB = mkBox("chat-b9z8", [mkDataImg(), mkDataImg(), imgB]);
+imgA.closest = () => boxA;
+imgB.closest = () => boxB;
+assert.equal(t.imageRef(imgA), "第 3/3 张图 · chat-a1b2", "按消息容器计数并带消息键");
+assert.notEqual(t.imageRef(imgA), t.imageRef(imgB), "不同消息里同序号的图不得同 ref");
+
+// --- ⑧ 来源标签只认右栏容器；判不出就 null（不再按 62% 宽度硬猜）---
+assert.equal(t.zoneOf({ closest: (sel) => (/data-sidebar-right-session/.test(sel) ? {} : null) }), "panel");
+assert.equal(t.zoneOf({ closest: () => null }), null, "聊天区/判不出的位置不得标成侧栏面板");
+assert.equal(t.zoneOf(null), null);
+assert.equal(t.zoneOf({}), null, "没有 closest 的元素也要安全退回 null");
+
+// --- ④ 角标重算：预览增删/自身属性变化触发，canvas 也算候选，60ms 节流不退化 ---
+const previewNode = { nodeType: 1, matches: (s) => s.indexOf("iframe") >= 0, querySelector: () => null };
+assert.equal(
+  t.pinSyncRelevant({ type: "childList", addedNodes: [previewNode], removedNodes: [] }),
+  true,
+  "预览插入要重算角标",
+);
+assert.equal(
+  t.pinSyncRelevant({ type: "childList", addedNodes: [{ nodeType: 1, matches: () => false, querySelector: () => null }], removedNodes: [] }),
+  false,
+  "普通节点插入不重算",
+);
+assert.equal(t.pinSyncRelevant({ type: "attributes", target: previewNode }), true, "预览自身 style/class 变化要重算");
+assert.equal(
+  t.pinSyncRelevant({ type: "attributes", target: { nodeType: 1, matches: () => false } }),
+  false,
+  "别的节点属性抖动不重算（不扫全树）",
+);
+
+let observed = [];
+let roFire = null;
+globalThis.ResizeObserver = class {
+  constructor(cb) {
+    roFire = cb;
+  }
+  observe(n) {
+    observed.push(n);
+  }
+  unobserve() {}
+  disconnect() {}
+};
+let rectFrame = { left: 100, top: 200, width: 300, height: 200, right: 400, bottom: 400 };
+let rectCanvas = { left: 10, top: 10, width: 200, height: 200, right: 210, bottom: 210 };
+const frameNode = {
+  tagName: "IFRAME",
+  nodeType: 1,
+  getBoundingClientRect: () => rectFrame,
+  matches: (s) => s.indexOf("iframe") >= 0,
+  querySelector: () => null,
+};
+const canvasNode = {
+  tagName: "CANVAS",
+  nodeType: 1,
+  getBoundingClientRect: () => rectCanvas,
+  matches: (s) => s.indexOf("canvas") >= 0,
+  querySelector: () => null,
+};
+const hadQSPins = document.querySelectorAll;
+document.querySelectorAll = (sel) => (sel === "iframe, embed, object, canvas" ? [frameNode, canvasNode] : []);
+
+const pins = t.pins();
+assert.ok(pins, "角标探针要在 apply 时挂上");
+pins.sync();
+let snap = pins.snapshot();
+assert.equal(snap.length, 2, "iframe 与 canvas 都要角标");
+assert.equal(observed.length, 2, "ResizeObserver 要盯住每块预览");
+assert.equal(snap[0].left, "388px", "角标贴预览右下（400-0-12）");
+assert.equal(snap[0].top, "388px");
+
+rectFrame = { left: 100, top: 200, width: 400, height: 100, right: 500, bottom: 300 };
+pins.sync();
+snap = pins.snapshot();
+assert.equal(snap[0].left, "488px", "预览变宽后角标必须重算到新位置");
+assert.equal(snap[0].top, "288px");
+assert.equal(observed.length, 2, "稳定集合不得反复 observe（否则自触发循环）");
+
+rectFrame = { left: 100, top: 200, width: 50, height: 50, right: 150, bottom: 250 };
+pins.sync();
+assert.equal(pins.snapshot().length, 1, "缩到看不见的预览不再挂角标");
+
+const before = pins.syncs;
+pins.schedule();
+pins.schedule();
+await new Promise((r) => setTimeout(r, 120));
+assert.equal(pins.syncs, before + 1, "60ms 节流：连触发两次只重算一次");
+
+const beforeRO = pins.syncs;
+roFire([], {});
+await new Promise((r) => setTimeout(r, 120));
+assert.equal(pins.syncs, beforeRO + 1, "预览尺寸变化要经 ResizeObserver 触发重算");
+
+document.querySelectorAll = hadQSPins;
+delete globalThis.ResizeObserver;
+
 console.log("selftest ok");
